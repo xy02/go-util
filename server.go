@@ -31,10 +31,18 @@ type Result struct {
 func (s *ServerV1[T]) Send(req Handler[T]) *promise.Promise[any] {
 	ctx := s.Context()
 	replyChan := make(chan Result, 1)
-	s.reqChan <- request[T]{
+	select {
+	case <-ctx.Done():
+		return promise.NewWithPool(func(resolve func(any), reject func(error)) {
+			reject(errors.New("ctx done"))
+		}, s.getPool())
+	case s.reqChan <- request[T]{
 		replyChan,
 		req,
+	}:
+		//go on
 	}
+
 	// promise.NewWithPool()
 	return promise.NewWithPool(func(resolve func(any), reject func(error)) {
 		reply := <-replyChan
