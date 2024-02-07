@@ -3,6 +3,7 @@ package goutil
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"runtime/debug"
 	"time"
@@ -12,10 +13,14 @@ type Server[T any] interface {
 	On(req Handler[T]) (*Reply, error)
 	GetState() *T
 	Context() context.Context
+	Close() <-chan struct{}
 }
 
 type ServerV1[T any] struct {
 	context      context.Context
+	cancel       context.CancelFunc
+	endCh        chan struct{}
+	err          error
 	state        *T
 	destoryState func(*T)
 	reqChan      chan request[T]
@@ -56,8 +61,12 @@ func StartServer[T any](config ServerConfig[T]) Server[T] {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	ctx, cancel := context.WithCancel(ctx)
 	s := ServerV1[T]{
 		ctx,
+		cancel,
+		make(chan struct{}),
+		nil,
 		config.State,
 		config.OnCancel,
 		reqChan,
@@ -67,7 +76,7 @@ func StartServer[T any](config ServerConfig[T]) Server[T] {
 			if ctx.Err() != nil {
 				return
 			}
-			s.run(ctx)
+			s.run()
 			time.Sleep(time.Second)
 		}
 	}()
@@ -93,6 +102,11 @@ func (s *ServerV1[T]) On(req Handler[T]) (*Reply, error) {
 	return reply, nil
 }
 
+func (s *ServerV1[T]) Close() <-chan struct{} {
+	s.cancel()
+	return s.endCh
+}
+
 func (s *ServerV1[T]) Context() context.Context {
 	return s.context
 }
@@ -101,16 +115,23 @@ func (s *ServerV1[T]) GetState() *T {
 	return s.state
 }
 
-func (s *ServerV1[T]) run(ctx context.Context) (err error) {
+func (s *ServerV1[T]) run() (err error) {
+	defer s.cancel()
+	defer func() {
+		s.err = err
+		close(s.endCh)
+	}()
 	var currentReply *Reply
 	defer func() {
 		if r := recover(); r != nil {
 			// log.Printf("recovered, %T, %v\n", s.GetState(), r)
 			log.Printf("recovered, %T, %v\n%s\n", s.GetState(), r, string(debug.Stack()))
+			err = fmt.Errorf("%w: %v", errors.New("internal error"), r)
 		}
 		if currentReply != nil {
-			currentReply.err = errors.New("internal error")
+			currentReply.err = err
 			close(currentReply.ch)
+			currentReply = nil
 		}
 	}()
 	defer func() {
@@ -119,6 +140,7 @@ func (s *ServerV1[T]) run(ctx context.Context) (err error) {
 		}
 		s.destoryState(s.state)
 	}()
+	ctx := s.context
 	for {
 		select {
 		case <-ctx.Done():
