@@ -13,6 +13,7 @@ import (
 
 type Server[T any] interface {
 	getPool() promise.Pool
+	On(req Handler[T]) (*promise.Promise[any], error)
 	Send(req Handler[T]) *promise.Promise[any]
 	GetState() *T
 	Context() context.Context
@@ -29,13 +30,21 @@ type Result struct {
 }
 
 func (s *ServerV1[T]) Send(req Handler[T]) *promise.Promise[any] {
+	p, err := s.On(req)
+	if err != nil {
+		return promise.NewWithPool(func(resolve func(any), reject func(error)) {
+			reject(errors.New("ctx done"))
+		}, s.getPool())
+	}
+	return p
+}
+
+func (s *ServerV1[T]) On(req Handler[T]) (*promise.Promise[any], error) {
 	ctx := s.Context()
 	replyChan := make(chan Result, 1)
 	select {
 	case <-ctx.Done():
-		return promise.NewWithPool(func(resolve func(any), reject func(error)) {
-			reject(errors.New("ctx done"))
-		}, s.getPool())
+		return nil, ctx.Err()
 	case s.reqChan <- request[T]{
 		replyChan,
 		req,
@@ -61,7 +70,7 @@ func (s *ServerV1[T]) Send(req Handler[T]) *promise.Promise[any] {
 			return
 		}
 		resolve(*r)
-	}, s.getPool())
+	}, s.getPool()), nil
 }
 
 // type Request[T any] interface {
