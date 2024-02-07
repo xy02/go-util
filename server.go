@@ -6,96 +6,61 @@ import (
 	"log"
 	"runtime/debug"
 	"time"
-
-	"github.com/chebyrash/promise"
-	"github.com/sourcegraph/conc/pool"
 )
 
 type Server[T any] interface {
-	getPool() promise.Pool
-	On(req Handler[T]) (*promise.Promise[any], error)
-	Send(req Handler[T]) *promise.Promise[any]
+	On(req Handler[T]) (*Reply, error)
 	GetState() *T
 	Context() context.Context
 }
-
-type request[T any] struct {
-	replyChan chan<- Result
-	fn        Handler[T]
-}
-
-type Result struct {
-	Ok  any
-	Err error
-}
-
-func (s *ServerV1[T]) Send(req Handler[T]) *promise.Promise[any] {
-	p, err := s.On(req)
-	if err != nil {
-		return promise.NewWithPool(func(resolve func(any), reject func(error)) {
-			reject(errors.New("ctx done"))
-		}, s.getPool())
-	}
-	return p
-}
-
-func (s *ServerV1[T]) On(req Handler[T]) (*promise.Promise[any], error) {
-	ctx := s.Context()
-	replyChan := make(chan Result, 1)
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case s.reqChan <- request[T]{
-		replyChan,
-		req,
-	}:
-		//go on
-	}
-
-	// promise.NewWithPool()
-	return promise.NewWithPool(func(resolve func(any), reject func(error)) {
-		reply := <-replyChan
-		if reply.Err != nil {
-			reject(reply.Err)
-			return
-		}
-		p, ok := reply.Ok.(*promise.Promise[any])
-		if !ok {
-			resolve(reply.Ok)
-			return
-		}
-		r, err := p.Await(ctx)
-		if err != nil {
-			reject(err)
-			return
-		}
-		resolve(*r)
-	}, s.getPool()), nil
-}
-
-// type Request[T any] interface {
-// 	Handle(Server[T]) Result
-// }
-
-type Handler[T any] func(Server[T]) Result
 
 type ServerV1[T any] struct {
 	context      context.Context
 	state        *T
 	destoryState func(*T)
 	reqChan      chan request[T]
-	p            promise.Pool
 }
 
-func StartServer[T any](ctx context.Context, state *T, destoryState func(*T)) Server[T] {
-	p := pool.New().WithMaxGoroutines(4)
-	reqChan := make(chan request[T], 1000)
+type Handler[T any] func(context.Context, *T) (any, error)
+
+type request[T any] struct {
+	fn    Handler[T]
+	reply *Reply
+}
+
+type ServerConfig[T any] struct {
+	Ctx            context.Context
+	State          *T
+	OnCancel       func(state *T)
+	RequestChanLen int
+}
+
+type Reply struct {
+	value any
+	err   error
+	ch    chan struct{}
+}
+
+func (r *Reply) Await(ctx context.Context) (any, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-r.ch:
+		return r.value, r.err
+	}
+}
+
+func StartServer[T any](config ServerConfig[T]) Server[T] {
+	reqChan := make(chan request[T], config.RequestChanLen)
+	ctx := config.Ctx
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	s := ServerV1[T]{
 		ctx,
-		state,
-		destoryState,
+		config.State,
+		config.OnCancel,
 		reqChan,
-		promise.FromConcPool(p),
 	}
 	go func() {
 		for {
@@ -109,53 +74,59 @@ func StartServer[T any](ctx context.Context, state *T, destoryState func(*T)) Se
 	return &s
 }
 
-func (s *ServerV1[T]) getPool() promise.Pool {
-	return s.p
-}
-
-func (s *ServerV1[T]) run(ctx context.Context) (err error) {
-	var currentReq request[T]
-	defer func() {
-		if r := recover(); r != nil {
-			// log.Printf("recovered, %T, %v\n", s.GetState(), r)
-			log.Printf("recovered, %T, %v\n%s\n", s.GetState(), r, string(debug.Stack()))
-		}
-		currentReq.replyChan <- Result{
-			Err: errors.New("interval error"),
-		}
-	}()
-	defer s.destoryState(s.state)
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case req := <-s.reqChan:
-			currentReq = req
-			result := req.fn(s)
-			if result.Err != nil {
-				log.Println(result.Err)
-			}
-			req.replyChan <- result
-		}
+func (s *ServerV1[T]) On(req Handler[T]) (*Reply, error) {
+	ctx := s.context
+	reply := &Reply{
+		nil,
+		nil,
+		make(chan struct{}),
 	}
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case s.reqChan <- request[T]{
+		req,
+		reply,
+	}:
+		//go on
+	}
+	return reply, nil
 }
 
-//	func (s *ServerV1[T]) Do(ctx context.Context, req Request[T]) (err error) {
-//		select {
-//		case <-ctx.Done():
-//			return ctx.Err()
-//		case s.reqChan <- req:
-//			return nil
-//		}
-//	}
-//
-//	func (s *ServerV1[T]) send(req request[T]) {
-//		s.reqChan <- req
-//	}
 func (s *ServerV1[T]) Context() context.Context {
 	return s.context
 }
 
 func (s *ServerV1[T]) GetState() *T {
 	return s.state
+}
+
+func (s *ServerV1[T]) run(ctx context.Context) (err error) {
+	var currentReply *Reply
+	defer func() {
+		if r := recover(); r != nil {
+			// log.Printf("recovered, %T, %v\n", s.GetState(), r)
+			log.Printf("recovered, %T, %v\n%s\n", s.GetState(), r, string(debug.Stack()))
+		}
+		if currentReply != nil {
+			currentReply.err = errors.New("internal error")
+			close(currentReply.ch)
+		}
+	}()
+	defer func() {
+		if s.destoryState == nil {
+			return
+		}
+		s.destoryState(s.state)
+	}()
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case req := <-s.reqChan:
+			currentReply = req.reply
+			currentReply.value, currentReply.err = req.fn(ctx, s.state)
+			close(currentReply.ch)
+		}
+	}
 }
