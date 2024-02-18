@@ -149,6 +149,7 @@ func (s *ServerV1[T]) run() (err error) {
 			currentReply = req.reply
 			currentReply.value, currentReply.err = req.fn(ctx, s.state)
 			close(currentReply.ch)
+			currentReply = nil
 		}
 	}
 }
