@@ -14,6 +14,8 @@ type Server[T any] interface {
 	GetState() *T
 	Context() context.Context
 	Close() <-chan struct{}
+	Request(req Handler[T]) (result any, err error)
+	RequestWithCtx(ctx context.Context, req Handler[T]) (result any, err error)
 }
 
 type ServerV1[T any] struct {
@@ -100,6 +102,24 @@ func (s *ServerV1[T]) On(req Handler[T]) (*Reply, error) {
 		//go on
 	}
 	return reply, nil
+}
+
+func (s *ServerV1[T]) Request(req Handler[T]) (result any, err error) {
+	reply, err := s.On(req)
+	if err != nil {
+		return
+	}
+	result, err = reply.Await(s.context)
+	return
+}
+
+func (s *ServerV1[T]) RequestWithCtx(ctx context.Context, req Handler[T]) (result any, err error) {
+	reply, err := s.On(req)
+	if err != nil {
+		return
+	}
+	result, err = reply.Await(ctx)
+	return
 }
 
 func (s *ServerV1[T]) Close() <-chan struct{} {
