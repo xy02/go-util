@@ -26,7 +26,7 @@ type ServerV1[T any] struct {
 	reqChan      chan request[T]
 }
 
-type Handler[T any] func(context.Context, *T) (any, error)
+type Handler[T any] func(*T, Server[T]) (any, error)
 
 type request[T any] struct {
 	fn    Handler[T]
@@ -147,7 +147,7 @@ func (s *ServerV1[T]) run() (err error) {
 			return ctx.Err()
 		case req := <-s.reqChan:
 			currentReply = req.reply
-			currentReply.value, currentReply.err = req.fn(ctx, s.state)
+			currentReply.value, currentReply.err = req.fn(s.state, s)
 			close(currentReply.ch)
 			currentReply = nil
 		}
