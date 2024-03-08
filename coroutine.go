@@ -1,6 +1,12 @@
 package goutil
 
-import "context"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log"
+	"runtime/debug"
+)
 
 type Coroutine[T any] struct {
 	cancel context.CancelFunc
@@ -20,6 +26,13 @@ func Go[T any](ctx context.Context, fn func(context.Context) (T, error)) *Corout
 	}
 	go func() {
 		defer close(endCh)
+		defer func() {
+			if r := recover(); r != nil {
+				// log.Printf("recovered, %T, %v\n", s.GetState(), r)
+				log.Printf("recovered, %v\n%s\n", r, string(debug.Stack()))
+				c.err = fmt.Errorf("%w: %v", errors.New("internal error"), r)
+			}
+		}()
 		result, err := fn(ctx)
 		c.value = &result
 		c.err = err
